@@ -25,11 +25,11 @@ const int MAX_RK_STEPS = 256;
 // hash function for random noise
 float hash(float n) { return fract(sin(n) * 43758.5453123); }
 
-// 선형 보간을 이용한 1D/2D 노이즈 (간단한 버전)
+// 1d/2d noise for linear interpolation
 float noise(vec2 x) {
     vec2 p = floor(x);
     vec2 f = fract(x);
-    f = f * f * (3.0 - 2.0 * f); // 부드러운 보간 (Hermite)
+    f = f * f * (3.0 - 2.0 * f); // smooth interpolation (Hermite)
     
     float n = p.x + p.y * 57.0;
     return mix(mix(hash(n +  0.0), hash(n +  1.0), f.x),
@@ -40,15 +40,14 @@ vec3 getDiskColor(vec3 p, vec3 v, float time) {
     float r_disk = length(p.xy);
     float angle = atan(p.y, p.x);
 
-    // 1. 도플러 효과 (비대칭 밝기)
-    // 원반은 반시계 방향으로 회전한다고 가정
+    // 1. doppler effect
     vec3 orbitVel = normalize(vec3(-p.y, p.x, 0.0)); 
-    float doppler = dot(orbitVel, -v); // 다가오면 +, 멀어지면 -
-    float beaming = pow(1.0 + doppler * 0.7, 3.0); // 계수를 높일수록 비대칭이 심해짐
+    float doppler = dot(orbitVel, -v); 
+    float beaming = pow(1.0 + doppler * 0.7, 3.0);
 
-    // 2. 가스 질감 (노이즈)
-    float n = noise(vec2(angle * 3.0 + time * 1.5, r_disk * 0.5)); // 시간에 따른 회전 추가 가능
-    n = max(n, 0.0); // 음수 방지
+    // 2. gas texture
+    float n = noise(vec2(angle * 3.0 + time * 1.5, r_disk * 0.5));
+    n = max(n, 0.0); // prevent from being negative
 
     float intensity = 1.0 - (r_disk - DISK_INNER_RADIUS) / (DISK_OUTER_RADIUS - DISK_INNER_RADIUS);
     vec3 color = mix(vec3(0.8, 0.3, 0.1), vec3(1.0, 0.9, 0.8), intensity);
@@ -82,7 +81,7 @@ vec3 calculateAcceleration(vec3 p, vec3 v) {
 void stepRK4(inout vec3 p, inout vec3 v, float DT, float r) {
 
     // float adaptiveDT = DT;
-    float adaptiveDT = DT * (r / 10.0); // <- reducess error and computational cost
+    float adaptiveDT = DT * (r / 10.0); // <- reduces error and computational cost
 
     // k1
     vec3 k1_v = v;
@@ -137,10 +136,9 @@ void main() {
         vec3 prev_p = p;
         stepRK4(p, v, DT, r);
 
-        // 1. 강착 원반과의 교차점 검출
+        // 1. Detect intersections with accretion disks
         // 광선이 Z=0 평면을 가로질렀는지 확인
         if (abs(p.z) < thickness) { // Z축을 가로질렀을 때 (한쪽은 양수, 한쪽은 음수)
-            // 선형 보간을 사용하여 정확한 교차점 계산
             float t = abs(prev_p.z) / (abs(prev_p.z) + abs(p.z));
             vec3 intersection_point = mix(prev_p, p, t);
 
@@ -150,7 +148,7 @@ void main() {
                 vec3 diskColor = getDiskColor(intersection_point, v, push.time);
                 
                 // 빛이 얼마나 강착 원반을 통과했는지에 따라 색상 누적
-                // 여기서는 간단히 ADDitive Blending
+                // 간단히 Additive Blending
                 resultColor += diskColor * DT * 0.1; // 0.1은 강도 조절 (너무 밝아지는 것 방지)
             }
         }
