@@ -1,0 +1,166 @@
+#version 450
+
+layout(set = 0, binding = 0) uniform cameraBuffer {
+    mat4 viewInv;
+    mat4 projInv;
+} cam;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D outImage;
+layout(set = 1, binding = 0) uniform samplerCube skybox;
+layout(push_constant) uniform PushConstant {
+    float time;
+} push;
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// BLACK HOLE PARAMETERS
+const float RS = 1.0; // black hole radius (schwarzschild radius)
+const float DISK_INNER_RADIUS = RS * 2.0; // inner radius of accretion disk
+const float DISK_OUTER_RADIUS = RS * 10.0; // outer radius of accretion disk
+const float thickness = 0.05;
+
+// RK4 PARAMETERS
+const float DT = 0.4;
+const int MAX_RK_STEPS = 256;
+
+// hash function for random noise
+float hash(float n) { return fract(sin(n) * 43758.5453123); }
+
+// 선형 보간을 이용한 1D/2D 노이즈 (간단한 버전)
+float noise(vec2 x) {
+    vec2 p = floor(x);
+    vec2 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f); // 부드러운 보간 (Hermite)
+    
+    float n = p.x + p.y * 57.0;
+    return mix(mix(hash(n +  0.0), hash(n +  1.0), f.x),
+               mix(hash(n + 57.0), hash(n + 58.0), f.x), f.y);
+}
+
+vec3 getDiskColor(vec3 p, vec3 v, float time) {
+    float r_disk = length(p.xy);
+    float angle = atan(p.y, p.x);
+
+    // 1. 도플러 효과 (비대칭 밝기)
+    // 원반은 반시계 방향으로 회전한다고 가정
+    vec3 orbitVel = normalize(vec3(-p.y, p.x, 0.0)); 
+    float doppler = dot(orbitVel, -v); // 다가오면 +, 멀어지면 -
+    float beaming = pow(1.0 + doppler * 0.7, 3.0); // 계수를 높일수록 비대칭이 심해짐
+
+    // 2. 가스 질감 (노이즈)
+    float n = noise(vec2(angle * 3.0 + time * 1.5, r_disk * 0.5)); // 시간에 따른 회전 추가 가능
+    n = max(n, 0.0); // 음수 방지
+
+    float intensity = 1.0 - (r_disk - DISK_INNER_RADIUS) / (DISK_OUTER_RADIUS - DISK_INNER_RADIUS);
+    vec3 color = mix(vec3(0.8, 0.3, 0.1), vec3(1.0, 0.9, 0.8), intensity);
+
+    return color * intensity * beaming * n * 10.0;
+
+
+    // if (r_disk < DISK_INNER_RADIUS || r_disk > DISK_OUTER_RADIUS) {
+    //     return vec3(0.0);
+    // }
+    // float d = noise(vec2(angle * 5.0, r_disk * 2.0));
+
+    // // 안쪽 고리에 가까우면 1.0에 가깝게, 외부 고리에 가까우면 0.0에 가깝게
+    // float intensity = 1.0 - (r_disk - DISK_INNER_RADIUS) / (DISK_OUTER_RADIUS - DISK_INNER_RADIUS);
+    // intensity *= d; // 노이즈를 곱해 불규칙한 질감 추가
+
+    // vec3 color = mix(vec3(0.8, 0.2, 0.1), vec3(0.9, 0.9, 1.0), intensity); // Red-Orange to Blue-White
+    // return color * (intensity * intensity + 0.1) * 5.0; // 밝기 조정
+}
+
+vec3 calculateAcceleration(vec3 p, vec3 v) {
+    float r2 = dot(p, p);
+    float r = sqrt(r2);
+    vec3 L = cross(p, v);
+    float h2 = dot(L, L); // square of angular momentum
+    
+    // approximation formula of gravitational lens acceleration
+    return -1.5 * RS * h2 * p / (r2 * r2 * r);
+}
+
+void stepRK4(inout vec3 p, inout vec3 v, float DT, float r) {
+
+    // float adaptiveDT = DT;
+    float adaptiveDT = DT * (r / 10.0); // <- reducess error and computational cost
+
+    // k1
+    vec3 k1_v = v;
+    vec3 k1_a = calculateAcceleration(p, k1_v);
+
+    // k2
+    vec3 k2_v = v + 0.5 * adaptiveDT * k1_a;
+    vec3 k2_a = calculateAcceleration(p + 0.5 * adaptiveDT * k1_v, k2_v);
+
+    // k3
+    vec3 k3_v = v + 0.5 * adaptiveDT * k2_a;
+    vec3 k3_a = calculateAcceleration(p + 0.5 * adaptiveDT * k2_v, k3_v);
+
+    // k4
+    vec3 k4_v = v + adaptiveDT * k3_a;
+    vec3 k4_a = calculateAcceleration(p + adaptiveDT * k3_v, k4_v);
+
+    // update weighted average
+    p += (adaptiveDT / 6.0) * (k1_v + 2.0 * k2_v + 2.0 * k3_v + k4_v);
+    v += (adaptiveDT / 6.0) * (k1_a + 2.0 * k2_a + 2.0 * k3_a + k4_a);
+    
+    v = normalize(v); 
+}
+
+void main() {
+    ivec2 pixelCoords = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outImage);
+
+    if (pixelCoords.x >= size.x || pixelCoords.y >= size.y) return;
+
+    vec2 uv = (vec2(pixelCoords) + 0.5) / vec2(size);
+    vec2 ndc = uv * 2.0 - 1.0; // 0 ~ 1 -> -1 ~ 1
+
+    // target point in clip space (far plane)
+    vec4 tgt = cam.projInv * vec4(ndc, 1.0, 1.0);
+    vec3 rayDirView = normalize(tgt.xyz / tgt.w); // View Space 내에서의 방향
+
+    // view space -> world space
+    vec3 p = cam.viewInv[3].xyz;
+    vec3 v = normalize((cam.viewInv *  vec4(rayDirView, 0.0)).xyz);
+
+    vec3 resultColor = vec4(0.0).rgb;
+
+    for (int i = 0; i < MAX_RK_STEPS; i++) {
+        float r = length(p);
+
+        if (r < RS * 1.01) { 
+            // resultColor = vec3(0.0); // 블랙홀 안으로 빨려 들어감 (검은색)
+            break; 
+        }
+
+        vec3 prev_p = p;
+        stepRK4(p, v, DT, r);
+
+        // 1. 강착 원반과의 교차점 검출
+        // 광선이 Z=0 평면을 가로질렀는지 확인
+        if (abs(p.z) < thickness) { // Z축을 가로질렀을 때 (한쪽은 양수, 한쪽은 음수)
+            // 선형 보간을 사용하여 정확한 교차점 계산
+            float t = abs(prev_p.z) / (abs(prev_p.z) + abs(p.z));
+            vec3 intersection_point = mix(prev_p, p, t);
+
+            // 교차점이 원반의 반지름 범위 내에 있는지 확인
+            float disk_r = length(intersection_point.xy);
+            if (disk_r >= DISK_INNER_RADIUS && disk_r <= DISK_OUTER_RADIUS) {
+                vec3 diskColor = getDiskColor(intersection_point, v, push.time);
+                
+                // 빛이 얼마나 강착 원반을 통과했는지에 따라 색상 누적
+                // 여기서는 간단히 ADDitive Blending
+                resultColor += diskColor * DT * 0.1; // 0.1은 강도 조절 (너무 밝아지는 것 방지)
+            }
+        }
+
+        // 4. 탈출 조건 (블랙홀에서 충분히 멀어지면 스카이박스 샘플링)
+        if (r > 100.0) {
+            resultColor += texture(skybox, v).rgb;
+            break;
+        }
+    }
+
+    imageStore(outImage, pixelCoords, vec4(resultColor, 1.0));
+}
