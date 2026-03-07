@@ -488,8 +488,8 @@ void Renderer::createSwapchain() {
   for (const VkPresentModeKHR &mode : presentModes) {
     if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
       presentMode = mode;
+      break;
     }
-    break;
   }
   if (presentMode != VK_PRESENT_MODE_MAILBOX_KHR) {
     presentMode = VK_PRESENT_MODE_FIFO_KHR;
